@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { Statistics } from '../types';
 
 // Helper to format numbers, especially floats, and handle N/A cases.
@@ -87,6 +87,66 @@ const DistributionTable: React.FC<{ distribution: any }> = ({ distribution }) =>
     );
 };
 
+const InteractiveBarChart: React.FC<{ title: string; items: { label: string; value: number; unit?: string }[] }> = ({ title, items }) => {
+    const max = useMemo(() => Math.max(1, ...items.map(i => Number(i.value) || 0)), [items]);
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => { const t = setTimeout(() => setMounted(true), 10); return () => clearTimeout(t); }, [items]);
+
+    return (
+        <div className="bg-slate-800/30 p-4 rounded-lg border border-slate-700/50">
+            <h4 className="text-md font-semibold text-slate-200 mb-3 capitalize">{title}</h4>
+            <div className="flex items-end gap-3 h-40">
+                {items.map((item, idx) => {
+                    const h = Math.max(0, Math.min(1, (Number(item.value) || 0) / max));
+                    return (
+                        <div key={idx} className="flex flex-col items-center gap-2 flex-1">
+                            <div className="w-full relative">
+                                <div
+                                    className={`w-full rounded-md bg-gradient-to-t from-cyan-600/50 via-cyan-500/40 to-cyan-400/30 backdrop-blur-sm border border-cyan-400/30 transition-transform duration-500 ease-out will-change-transform ${mounted ? 'translate-y-0' : 'translate-y-full'}`}
+                                    style={{ transform: mounted ? `translateY(${(1 - h) * 100}%)` : 'translateY(100%)', height: '100%' }}
+                                    aria-label={`${item.label}: ${item.value}`}
+                                    role="img"
+                                />
+                                <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-xs font-mono text-slate-300">{(Number(item.value) || 0).toLocaleString()}</div>
+                            </div>
+                            <div className="text-[11px] text-slate-400 truncate max-w-[8ch]" title={item.label}>{item.label}</div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
+const HistogramChart: React.FC<{ title: string; data: { label: string; value: number }[] }> = ({ title, data }) => {
+    const max = useMemo(() => Math.max(1, ...data.map(i => Number(i.value) || 0)), [data]);
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => { const t = setTimeout(() => setMounted(true), 10); return () => clearTimeout(t); }, [data]);
+
+    return (
+        <div className="bg-slate-800/30 p-4 rounded-lg border border-slate-700/50">
+            <h4 className="text-md font-semibold text-slate-200 mb-3 capitalize">{title}</h4>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(20px,1fr))] gap-2 h-40 items-end">
+                {data.map((bin, i) => {
+                    const h = Math.max(0, Math.min(1, (Number(bin.value) || 0) / max));
+                    return (
+                        <div key={i} className="group flex flex-col items-center gap-1">
+                            <div
+                                className={`w-full rounded-sm bg-gradient-to-t from-amber-600/50 via-amber-500/40 to-amber-400/30 border border-amber-400/30 transition-transform duration-500 ease-out will-change-transform ${mounted ? 'translate-y-0' : 'translate-y-full'}`}
+                                style={{ transform: mounted ? `translateY(${(1 - h) * 100}%)` : 'translateY(100%)', height: '100%' }}
+                                aria-label={`${bin.label}: ${bin.value}`}
+                                role="img"
+                            />
+                            <div className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-slate-400 font-mono">{(Number(bin.value) || 0).toLocaleString()}</div>
+                            <div className="text-[10px] text-slate-500 truncate max-w-[8ch]" title={bin.label}>{bin.label}</div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
 export const StatisticsDisplay: React.FC<{ stats: Statistics }> = ({ stats }) => {
     if (!stats || typeof stats !== 'object' || Array.isArray(stats)) {
         return <p className="text-sm text-slate-400">{stats || 'No statistics available to display.'}</p>;
@@ -109,26 +169,34 @@ export const StatisticsDisplay: React.FC<{ stats: Statistics }> = ({ stats }) =>
                 </div>
             )}
             
-            {/* --- Detailed Metrics Section --- */}
+            {/* --- Detailed Metrics Section (Cards + Interactive Bars) --- */}
             {Array.isArray(metrics) && metrics.length > 0 && (
                  <div>
                     <h3 className="text-lg font-bold text-slate-100 mb-4 border-b border-slate-700 pb-2">Detailed Metrics</h3>
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {metrics.map((metric, i) => (
-                           <MetricDetailCard key={i} metric={metric} />
+                           <MetricDetailCard key={`card-${i}`} metric={metric} />
                         ))}
+                    </div>
+                    <div className="mt-6">
+                        <InteractiveBarChart title="Metrics Overview" items={metrics.map((m: any) => ({ label: m.name, value: Number(m.value) || 0, unit: m.unit }))} />
                     </div>
                 </div>
             )}
 
-            {/* --- Distributions Section --- */}
+            {/* --- Distributions Section (Table or Histogram) --- */}
             {Array.isArray(distributions) && distributions.length > 0 && (
                 <div>
                     <h3 className="text-lg font-bold text-slate-100 mb-4 border-b border-slate-700 pb-2">Distributions</h3>
                     <div className="space-y-6">
-                        {distributions.map((dist, i) => (
-                           <DistributionTable key={i} distribution={dist} />
-                        ))}
+                        {distributions.map((dist: any, i: number) => {
+                            const dataArr = Array.isArray(dist?.data) ? dist.data : null;
+                            return dataArr && dataArr.length > 0 ? (
+                                <HistogramChart key={`hist-${i}`} title={dist.name || 'Distribution'} data={dataArr.map((d: any) => ({ label: String(d.label ?? d.bin ?? ''), value: Number(d.value ?? d.count ?? 0) }))} />
+                            ) : (
+                                <DistributionTable key={`table-${i}`} distribution={dist} />
+                            );
+                        })}
                     </div>
                 </div>
             )}

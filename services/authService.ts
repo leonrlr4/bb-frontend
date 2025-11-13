@@ -1,8 +1,7 @@
 
 
 import type { User, LoginResponse } from '../types';
-
-const API_BASE_URL = 'https://1f78112e7eab.ngrok-free.app';
+import { API_BASE_URL } from '@/config';
 
 const getErrorMessage = (errorBody: any): string => {
     if (!errorBody || !errorBody.detail) {

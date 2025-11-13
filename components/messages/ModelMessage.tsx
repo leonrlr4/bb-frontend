@@ -9,11 +9,12 @@ import type { Message, StreamingState } from '../../types';
 import { formatRelativeTime } from '../../utils';
 
 const ActionableFileChip: React.FC<{
-    file: { name: string; downloadUrl: string };
-    onPreview: (name: string, url: string) => void;
+    file: { name: string; downloadUrl: string; filePath?: string };
+    onPreview: (file: { name: string; downloadUrl: string; filePath?: string }) => void;
     onDownload: (name: string, url: string) => void;
     isDownloading: boolean;
-}> = ({ file, onPreview, onDownload, isDownloading }) => {
+    isPreviewing?: boolean;
+}> = ({ file, onPreview, onDownload, isDownloading, isPreviewing }) => {
     const [showActions, setShowActions] = useState(false);
     return (
         <div 
@@ -27,11 +28,12 @@ const ActionableFileChip: React.FC<{
             </div>
             <div className={`flex items-center gap-1 flex-shrink-0 transition-opacity duration-200 ${showActions ? 'opacity-100' : 'opacity-0'}`}>
                 <button 
-                    onClick={() => onPreview(file.name, file.downloadUrl)} 
-                    className="p-1.5 rounded-md hover:bg-slate-700 text-slate-300 transition-colors" 
+                    onClick={() => onPreview(file)} 
+                    disabled={Boolean(isPreviewing)}
+                    className="p-1.5 rounded-md hover:bg-slate-700 disabled:cursor-not-allowed text-slate-300 transition-colors" 
                     title="Preview file"
                 >
-                    <EyeIcon className="w-4 h-4" />
+                    {isPreviewing ? <RefreshIcon className="w-4 h-4 text-slate-300 animate-spin" /> : <EyeIcon className="w-4 h-4" />}
                 </button>
                 <button 
                     onClick={() => onDownload(file.name, file.downloadUrl)} 
@@ -106,10 +108,11 @@ export const ModelMessage: React.FC<{
     message: Message;
     isStreaming: boolean;
     liveStreamingState: StreamingState | null;
-    onPreviewFile: (name: string, url: string) => void;
+    onPreviewFile: (file: { name: string; downloadUrl: string; filePath?: string }) => void;
     onDownloadFile: (name: string, url: string) => void;
     downloadingFile: string | null;
-}> = ({ message, isStreaming, liveStreamingState, onPreviewFile, onDownloadFile, downloadingFile }) => {
+    previewingFile?: string | null;
+}> = ({ message, isStreaming, liveStreamingState, onPreviewFile, onDownloadFile, downloadingFile, previewingFile }) => {
   const response = message.response;
   const [activeTab, setActiveTab] = useState('result');
   const [isTraceExpanded, setIsTraceExpanded] = useState(true);
@@ -149,7 +152,7 @@ export const ModelMessage: React.FC<{
   const hasStats = response.statistics && (typeof response.statistics === 'object' || !String(response.statistics).includes('not available'));
   const hasTrace = response.executionTrace?.length > 0;
   const hasOutputFiles = response.outputFiles?.length > 0;
-  const tabs = [{ id: 'result', label: 'Result' }, ...(hasCode ? [{ id: 'code', label: 'Code' }] : []), ...(hasStats ? [{ id: 'statistics', label: 'Statistics' }] : []), ...(hasTrace ? [{ id: 'trace', label: 'Execution Trace' }] : [])];
+  const tabs = [{ id: 'result', label: 'Result' }, ...(hasCode ? [{ id: 'code', label: 'Code' }] : []), ...(hasStats ? [{ id: 'statistics', label: 'Statistics' }] : []), { id: 'files', label: 'Files' }, ...(hasTrace ? [{ id: 'trace', label: 'Execution Trace' }] : [])];
 
   return (
     <div className="flex items-start gap-4 p-4 my-2">
@@ -159,7 +162,8 @@ export const ModelMessage: React.FC<{
         <div className="bg-slate-800/20 backdrop-blur-sm border border-slate-700/40 rounded-lg overflow-hidden">
             <div className="border-b border-slate-700/60 px-2"><nav className="-mb-px flex space-x-2" aria-label="Tabs">{tabs.map((tab) => <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`${activeTab === tab.id ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-500'} whitespace-nowrap py-2 px-3 border-b-2 font-medium text-sm transition-colors`}>{tab.label}</button>)}</nav></div>
             <div className="p-4">
-              {activeTab === 'result' && <div className="space-y-4">{isLogOutput ? <LogDisplay content={response.description} /> : <p className="text-slate-300 whitespace-pre-wrap">{response.description}</p>}{hasOutputFiles && <div><h4 className="text-sm font-semibold text-slate-300 mb-2 mt-4">Output Files</h4><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">{response.outputFiles.map(file => <ActionableFileChip key={file.name} file={file} onPreview={onPreviewFile} onDownload={onDownloadFile} isDownloading={downloadingFile === file.name} />)}</div></div>}</div>}
+              {activeTab === 'result' && <div className="space-y-4">{isLogOutput ? <LogDisplay content={response.description} /> : <p className="text-slate-300 whitespace-pre-wrap">{response.description}</p>}</div>}
+              {activeTab === 'files' && <div className="space-y-4"><div><h4 className="text-sm font-semibold text-slate-300 mb-2">Input Files</h4><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">{(response.inputFiles || []).map(file => <ActionableFileChip key={`in-${file.name}`} file={file} onPreview={onPreviewFile} onDownload={onDownloadFile} isDownloading={downloadingFile === file.name} isPreviewing={previewingFile === file.name} />)}</div></div><div><h4 className="text-sm font-semibold text-slate-300 mb-2">Output Files</h4><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">{response.outputFiles.map(file => <ActionableFileChip key={`out-${file.name}`} file={file} onPreview={onPreviewFile} onDownload={onDownloadFile} isDownloading={downloadingFile === file.name} isPreviewing={previewingFile === file.name} />)}</div></div></div>}
               {activeTab === 'code' && hasCode && <CodeBlock code={response.code} />}
               {activeTab === 'statistics' && hasStats && <StatisticsDisplay stats={response.statistics} />}
               {activeTab === 'trace' && hasTrace && <div className="space-y-4"><NodesStatistics nodes={response.executionTrace} /><ExecutionTrace trace={response.executionTrace} /></div>}

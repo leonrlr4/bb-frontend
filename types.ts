@@ -105,7 +105,8 @@ export interface AIResponsePayload {
   description: string;
   code: string;
   statistics: Statistics | string;
-  outputFiles: { name: string; downloadUrl: string }[];
+  outputFiles: { name: string; downloadUrl: string; filePath?: string }[];
+  inputFiles?: { name: string; downloadUrl: string; filePath?: string }[];
   toolsUsed: string[];
   executionTrace: NodeMetadata[];
 }
@@ -131,7 +132,7 @@ export interface Message {
   role: 'user' | 'model';
   prompt: string; // User's prompt text
   files: File[]; // Files attached by the user for the current turn
-  inputFiles?: { name: string; downloadUrl: string }[]; // Files from history
+  inputFiles?: { name: string; downloadUrl: string; filePath?: string }[]; // Files from history
   response?: AIResponsePayload; // Structured response for 'model' role
   streamingState?: StreamingState; // Live state during streaming
   timestamp: Date;
@@ -176,9 +177,9 @@ export interface StreamCallbacks {
   onWorkflowStart?: () => void;
   onConversationCreated?: (conversationId: string) => void;
   onFilesUploaded?: (count: number) => void;
-  onLlmToken?: (data: { node: string; token: string; accumulated_length: number }) => void;
+  onLlmToken?: (data: { node: string; content_type?: 'code' | 'analysis' | 'suggestion' | 'test_case'; token: string; accumulated_length: number }) => void;
   onNodeProgress?: (data: { node: string; message: string; }) => void;
-  onResultStreamChunk?: (data: { chunk: string; }) => void;
+  onResultStreamChunk?: (data: { chunk?: string; node?: string; success?: boolean; code_preview?: string; code_length?: number; }) => void;
   onNodeStart?: (data: { node: string; status: "started"; started_at?: string; }) => void;
   onNodeComplete?: (data: { node: string; status: string; duration_ms: number; metadata: any; }) => void;
   onFinalResult?: (result: any) => Promise<void> | void;

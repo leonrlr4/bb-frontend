@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { NodeMetadata, NodeSpecificMetadata, IntentMetadata, CodegenMetadata, ExecutionMetadata, ReviewMetadata, QAMetadata } from '../types';
 import { ChevronDownIcon, LinkIcon } from './icons';
 import { StreamingCodeDisplay } from './StreamingCodeDisplay';
@@ -13,6 +13,15 @@ const getStatusColor = (status: string) => {
     }
 };
 
+const getPillColor = (status: string) => {
+    switch (status) {
+      case 'success': return 'bg-green-500/15 border-green-500/40 text-green-300';
+      case 'failed': return 'bg-red-500/15 border-red-500/40 text-red-300';
+      case 'running': return 'bg-blue-500/15 border-blue-500/40 text-blue-300';
+      default: return 'bg-slate-700/30 border-slate-600/50 text-slate-300';
+    }
+};
+
 const getStatusIcon = (status: string) => {
     switch (status) {
       case 'success': return <span className="text-green-400">✓</span>;
@@ -22,89 +31,99 @@ const getStatusIcon = (status: string) => {
     }
 };
 
-const NodeMetadataDisplay: React.FC<{ node: NodeMetadata }> = ({ node }) => {
+const normalizeDateString = (dateStr: string | undefined): string | undefined => {
+  if (!dateStr) return dateStr;
+  let normalized = dateStr.replace(' ', 'T');
+  if (!normalized.endsWith('Z') && !normalized.includes('+') && normalized.lastIndexOf('-') < 10) {
+    normalized += 'Z';
+  }
+  return normalized;
+};
+
+const NodeMetadataDisplay: React.FC<{ node: NodeMetadata; nowTs?: number }> = ({ node, nowTs }) => {
   const { name, metadata } = node;
 
-  if (!metadata) {
-    return <div className="text-xs text-slate-500">No metadata available for this node.</div>;
-  }
-
-  const renderSimpleMeta = (meta: { model?: string; tokens?: number }) => (
-    <>
-      {meta.model && <div><span className="text-slate-400">Model:</span> {meta.model}</div>}
-      {meta.tokens && <div><span className="text-slate-400">Tokens:</span> {meta.tokens.toLocaleString()}</div>}
-    </>
-  );
-
-  const renderSpecificMeta = () => {
-    switch (name) {
-      case 'intent': {
-        const intentMeta = metadata as IntentMetadata;
-        return (
-          <>
-            {renderSimpleMeta(intentMeta)}
-            {intentMeta.intent && <div><span className="text-slate-400">Intent:</span> {intentMeta.intent}</div>}
-            {intentMeta.complexity && (
-              <div>
-                <span className="text-slate-400">Complexity:</span>{' '}
-                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                  intentMeta.complexity === 'high' ? 'bg-red-200/20 text-red-300' :
-                  intentMeta.complexity === 'medium' ? 'bg-yellow-200/20 text-yellow-300' :
-                  'bg-green-200/20 text-green-300'
-                }`}>{intentMeta.complexity}</span>
-              </div>
-            )}
-            {intentMeta.domain && <div><span className="text-slate-400">Domain:</span> {intentMeta.domain}</div>}
-          </>
-        );
-      }
-      case 'codegen': {
-        const codegenMeta = metadata as CodegenMetadata;
-        return (
-          <>
-            {renderSimpleMeta(codegenMeta)}
-            {codegenMeta.code_length && <div><span className="text-slate-400">Code Length:</span> {codegenMeta.code_length} chars</div>}
-            {codegenMeta.retry_count !== undefined && codegenMeta.retry_count > 0 && (
-              <div><span className="text-slate-400">Retries:</span> <span className="text-orange-400">{codegenMeta.retry_count}</span></div>
-            )}
-          </>
-        );
-      }
-      case 'execution': {
-        const execMeta = metadata as ExecutionMetadata;
-        return (
-          <>
-            <div>
-                <span className="text-slate-400">Status:</span>{' '}
-                {execMeta.success ? <span className="text-green-400">Success</span> : <span className="text-red-400">Failed</span>}
-            </div>
-            {execMeta.output_files_count !== undefined && <div><span className="text-slate-400">Output Files:</span> {execMeta.output_files_count}</div>}
-            {execMeta.uploaded_files_count !== undefined && <div><span className="text-slate-400">Uploaded Files:</span> {execMeta.uploaded_files_count}</div>}
-            {execMeta.error && <div className="col-span-2 text-red-400"><span className="text-slate-400">Error:</span> {execMeta.error}</div>}
-          </>
-        );
-      }
-       case 'review': {
-        const reviewMeta = metadata as ReviewMetadata;
-        return renderSimpleMeta(reviewMeta);
-       }
-      case 'qa': {
-        const qaMeta = metadata as QAMetadata;
-        return (
-          <>
-            {renderSimpleMeta(qaMeta)}
-            {qaMeta.test_cases_length && <div><span className="text-slate-400">Test Cases:</span> {qaMeta.test_cases_length} chars</div>}
-          </>
-        );
-      }
-      default:
-        return <pre className="text-xs bg-slate-900 p-2 rounded overflow-auto">{JSON.stringify(metadata, null, 2)}</pre>;
-    }
+  const statusBadge = (status: string) => {
+    const color = status === 'success' ? 'text-green-400' : status === 'failed' ? 'text-red-400' : 'text-slate-400';
+    return <span className={color}>{status.charAt(0).toUpperCase() + status.slice(1)}</span>;
   };
+
+  const renderLlmOutput = (n: NodeMetadata) => {
+    const msgs = n.progressMessages || [];
+    const stream = msgs.filter(m => m.startsWith('[stream] ')).join('').replace(/^\[stream\]\s*/g, '');
+    if (!stream) return null;
+    return (
+      <div className="col-span-2 mt-2">
+        <span className="text-slate-400">LLM Output:</span>
+        <pre className="mt-1 bg-slate-900/60 p-2 rounded text-xs whitespace-pre-wrap text-slate-200 max-h-40 overflow-auto">{stream}</pre>
+      </div>
+    );
+  };
+
+  const model = (metadata as any)?.model ?? (metadata as any)?.model_used;
+  const tokens = (metadata as any)?.tokens ?? (metadata as any)?.tokens_used;
+
+  const durationMs = (node.status === 'running' && node.started_at)
+    ? Math.max(0, (nowTs ?? Date.now()) - Date.parse(normalizeDateString(node.started_at)!))
+    : (node.duration_ms || 0);
 
   return (
     <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm text-slate-300">
-      {renderSpecificMeta()}
+      <div><span className="text-slate-400">Status:</span> {statusBadge(node.status)}</div>
+      {model && <div><span className="text-slate-400">Model:</span> {model}</div>}
+      {tokens !== undefined && <div><span className="text-slate-400">Tokens:</span> {Number(tokens).toLocaleString()}</div>}
+
+      {name === 'intent' && (
+        <>
+          {(metadata as IntentMetadata).intent && <div><span className="text-slate-400">Intent:</span> {(metadata as IntentMetadata).intent}</div>}
+          {(metadata as IntentMetadata).complexity && (
+            <div>
+              <span className="text-slate-400">Complexity:</span>{' '}
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                (metadata as IntentMetadata).complexity === 'high' ? 'bg-red-200/20 text-red-300' :
+                (metadata as IntentMetadata).complexity === 'medium' ? 'bg-yellow-200/20 text-yellow-300' :
+                'bg-green-200/20 text-green-300'
+              }`}>
+                {(metadata as IntentMetadata).complexity}
+              </span>
+            </div>
+          )}
+          {(metadata as IntentMetadata).domain && <div><span className="text-slate-400">Domain:</span> {(metadata as IntentMetadata).domain}</div>}
+        </>
+      )}
+
+      {name === 'codegen' && (
+        <>
+          {(metadata as CodegenMetadata).code_length && <div><span className="text-slate-400">Code Length:</span> {(metadata as CodegenMetadata).code_length} chars</div>}
+          {(metadata as CodegenMetadata).retry_count !== undefined && (metadata as CodegenMetadata).retry_count! > 0 && (
+            <div><span className="text-slate-400">Retries:</span> <span className="text-orange-400">{(metadata as CodegenMetadata).retry_count}</span></div>
+          )}
+        </>
+      )}
+
+      {name === 'execution' && (
+        <>
+          {(metadata as ExecutionMetadata).output_files_count !== undefined && <div><span className="text-slate-400">Output Files:</span> {(metadata as ExecutionMetadata).output_files_count}</div>}
+          {(metadata as ExecutionMetadata).uploaded_files_count !== undefined && <div><span className="text-slate-400">Uploaded Files:</span> {(metadata as ExecutionMetadata).uploaded_files_count}</div>}
+          {(metadata as ExecutionMetadata).error && <div className="col-span-2 text-red-400"><span className="text-slate-400">Error:</span> {(metadata as ExecutionMetadata).error}</div>}
+        </>
+      )}
+
+      {name === 'qa' && (
+        <>
+          {(metadata as QAMetadata).test_cases_length && <div><span className="text-slate-400">Test Cases:</span> {(metadata as QAMetadata).test_cases_length} chars</div>}
+          {(metadata as QAMetadata).final_status && <div><span className="text-slate-400">Final Status:</span> {(metadata as QAMetadata).final_status}</div>}
+        </>
+      )}
+
+      {node.started_at && <div><span className="text-slate-400">Started:</span> {new Date(Date.parse(normalizeDateString(node.started_at)!)).toLocaleString()}</div>}
+      {node.completed_at && <div><span className="text-slate-400">Completed:</span> {new Date(Date.parse(normalizeDateString(node.completed_at)!)).toLocaleString()}</div>}
+      <div><span className="text-slate-400">Duration:</span> {(durationMs / 1000).toFixed(2)}s</div>
+      {node.progressMessages && node.progressMessages.length > 0 && (
+        <div><span className="text-slate-400">Progress Messages:</span> {node.progressMessages.length}</div>
+      )}
+
+      {renderLlmOutput(node)}
     </div>
   );
 };
@@ -112,6 +131,17 @@ const NodeMetadataDisplay: React.FC<{ node: NodeMetadata }> = ({ node }) => {
 
 const NodeCard: React.FC<{ node: NodeMetadata, isStreaming?: boolean, streamingCode?: string }> = ({ node, isStreaming, streamingCode }) => {
   const [isExpanded, setIsExpanded] = useState(node.status === 'running');
+  const [nowTs, setNowTs] = useState<number>(Date.now());
+  useEffect(() => {
+    if (node.status === 'running') {
+      const id = setInterval(() => setNowTs(Date.now()), 200);
+      return () => clearInterval(id);
+    }
+  }, [node.status, node.started_at]);
+
+  const headerDurationMs = (node.status === 'running' && node.started_at)
+    ? Math.max(0, nowTs - Date.parse(normalizeDateString(node.started_at)!))
+    : (node.duration_ms || 0);
   
   const isCodegenStreaming = isStreaming && node.name === 'codegen' && node.status === 'running';
 
@@ -130,7 +160,7 @@ const NodeCard: React.FC<{ node: NodeMetadata, isStreaming?: boolean, streamingC
                  <div className="flex items-center justify-between">
                     <h4 className="text-md font-semibold capitalize text-slate-200">{node.name.replace(/_/g, ' ')}</h4>
                     <span className="text-sm text-slate-400 font-mono">
-                        {node.duration_ms > 0 ? `${(node.duration_ms / 1000).toFixed(2)}s` : '0.00s'}
+                        {(headerDurationMs / 1000).toFixed(2)}s
                     </span>
                  </div>
                  <div className="mt-2 space-y-3">
@@ -142,7 +172,7 @@ const NodeCard: React.FC<{ node: NodeMetadata, isStreaming?: boolean, streamingC
                     </button>
                     {isExpanded && (
                          <div className={`mt-2 p-4 rounded-lg border bg-slate-800/50 ${getStatusColor(node.status)}`}>
-                             <NodeMetadataDisplay node={node} />
+                             <NodeMetadataDisplay node={node} nowTs={nowTs} />
                              {isCodegenStreaming && streamingCode !== undefined && (
                                  <div className="mt-4">
                                      <StreamingCodeDisplay code={streamingCode} isStreaming={true} />
@@ -192,3 +222,4 @@ export const ExecutionTrace: React.FC<{ trace: NodeMetadata[] | undefined, isStr
     </div>
   );
 };
+// removed duplicate helpers

@@ -4,8 +4,8 @@ import { formatRelativeTime } from '../../utils';
 import type { Message } from '../../types';
 
 const ActionableFileChip: React.FC<{
-    file: { name: string; downloadUrl: string };
-    onPreview: (name: string, url: string) => void;
+    file: { name: string; downloadUrl: string; filePath?: string };
+    onPreview: (file: { name: string; downloadUrl: string; filePath?: string }) => void;
     onDownload: (name: string, url: string) => void;
     isDownloading: boolean;
 }> = ({ file, onPreview, onDownload, isDownloading }) => {
@@ -22,7 +22,7 @@ const ActionableFileChip: React.FC<{
             </div>
             <div className={`flex items-center gap-1 flex-shrink-0 transition-opacity duration-200 ${showActions ? 'opacity-100' : 'opacity-0'}`}>
                 <button 
-                    onClick={() => onPreview(file.name, file.downloadUrl)} 
+                    onClick={() => onPreview(file)} 
                     className="p-1.5 rounded-md hover:bg-slate-700 text-slate-300 transition-colors" 
                     title="Preview file"
                 >
@@ -69,9 +69,10 @@ export const UserMessage: React.FC<{
             </div>
             <div className="mt-2 space-y-3">
                 {message.prompt && <p className="text-slate-200 whitespace-pre-wrap">{message.prompt}</p>}
-                {(message.files?.length > 0 || message.inputFiles?.length > 0) && (
+                {(message.inputFiles?.length || message.files?.length) ? (
                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                        {message.inputFiles?.map((file, index) => (
+                        {(message.inputFiles && message.inputFiles.length > 0) ? (
+                          message.inputFiles.map((file, index) => (
                              <ActionableFileChip 
                                 key={`${file.name}-${index}`} 
                                 file={file} 
@@ -79,12 +80,14 @@ export const UserMessage: React.FC<{
                                 onDownload={onDownloadFile}
                                 isDownloading={downloadingFile === file.name}
                             />
-                        ))}
-                        {message.files.map((file) => (
+                          ))
+                        ) : (
+                          message.files.map((file) => (
                             <NewFileChip key={file.name} name={file.name} />
-                        ))}
+                          ))
+                        )}
                      </div>
-                )}
+                ) : null}
             </div>
         </div>
     </div>

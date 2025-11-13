@@ -45,6 +45,9 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [liveStreamingState, setLiveStreamingState] = useState<StreamingState | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
+  const liveStateRef = useRef<StreamingState | null>(null);
+  const activeWorkflowIdRef = useRef<string | null>(null);
+  const nodeBuffersRef = useRef<Record<string, { progress: string[]; llm: string; codePreview?: string }>>({});
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -73,12 +76,17 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setActiveWorkflowId(null);
     }
   }, [user, fetchHistory]);
+  useEffect(() => { liveStateRef.current = liveStreamingState; }, [liveStreamingState]);
+  useEffect(() => { activeWorkflowIdRef.current = activeWorkflowId; }, [activeWorkflowId]);
   
   const streamCallbacks: StreamCallbacks = useMemo(() => {
     const progressMap: { [key: string]: number } = { 'intent': 20, 'codegen': 40, 'execution': 60, 'review': 80, 'qa': 95 };
 
     return {
-      onWorkflowStart: () => setLiveStreamingState(s => ({ ...(s || getInitialStreamingState()), currentNode: 'Workflow Started', progress: 10 })),
+      onWorkflowStart: () => setLiveStreamingState(s => {
+        const base = s || getInitialStreamingState();
+        return { ...base, currentNode: 'Workflow Started', progress: 10, nodes: base.nodes };
+      }),
       onConversationCreated: (newConvId: string) => {
         setWorkflows(prev => {
           const currentStreamingMessageId = streamingMessageIdRef.current;
@@ -91,29 +99,153 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return updatedWorkflows;
         });
       },
-      onLlmToken: (data) => setLiveStreamingState(s => (!s || data.node !== 'codegen' || !data.token) ? s : { ...s, streamingCode: (s.streamingCode || '') + data.token }),
-      onNodeProgress: (data) => setLiveStreamingState(s => {
-        if (!s) return null;
-        const updatedNodes = s.nodes.map(node => node.name === data.node && node.status === 'running' ? { ...node, progressMessages: [...(node.progressMessages || []), data.message] } : node);
+      onFilesUploaded: async () => {
+        const convId = activeWorkflowIdRef.current;
+        if (!convId) return;
+        try {
+          const files = await getConversationFiles(convId);
+          setWorkflows(prev => prev.map(w => {
+            if (w.id !== convId) return w;
+            const lastUserIndex = w.history.findIndex(m => m.role === 'user');
+            if (lastUserIndex === -1) return w;
+            const userMsg = w.history[lastUserIndex];
+            const updatedUserMsg = { ...userMsg, inputFiles: files.input };
+            const history = [...w.history];
+            history[lastUserIndex] = updatedUserMsg;
+            return { ...w, history };
+          }));
+        } catch (e) {
+          console.warn('Failed to fetch conversation files during streaming:', e);
+        }
+      },
+      onLlmToken: (data) => setLiveStreamingState(s => {
+        if (!s || !data.token) return s;
+        const hasNode = (s.nodes || []).some(n => n.name === data.node);
+        if (!hasNode) {
+          const buf = nodeBuffersRef.current[data.node] || { progress: [], llm: '' };
+          buf.llm += data.token;
+          nodeBuffersRef.current[data.node] = buf;
+          const placeholder: NodeMetadata = { name: data.node, status: 'running', duration_ms: 0, started_at: new Date().toISOString(), metadata: {} as any, progressMessages: [] };
+          return { ...s, nodes: [...(s.nodes || []), placeholder], currentNode: data.node, progress: ( { 'intent': 20, 'codegen': 40, 'execution': 60, 'review': 80, 'qa': 95 } as any )[data.node] || s.progress };
+        }
+        if (data.content_type === 'code' || (!data.content_type && data.node === 'codegen')) {
+          return { ...s, streamingCode: (s.streamingCode || '') + data.token };
+        }
+        const updatedNodes = (s.nodes || []).map(node => {
+          if (node.name !== data.node) return node;
+          const msgs = [...(node.progressMessages || [])];
+          const lastIndex = msgs.length - 1;
+          if (lastIndex >= 0 && msgs[lastIndex].startsWith('[stream] ')) {
+            msgs[lastIndex] = msgs[lastIndex] + data.token;
+          } else {
+            msgs.push('[stream] ' + data.token);
+          }
+          return { ...node, progressMessages: msgs };
+        });
         return { ...s, nodes: updatedNodes };
       }),
-      onResultStreamChunk: (data) => setLiveStreamingState(s => ({ ...(s || getInitialStreamingState()), streamingDescription: ((s?.streamingDescription || '') + data.chunk) })),
+      onNodeProgress: (data) => setLiveStreamingState(s => {
+        if (!s) return null;
+        const hasNode = s.nodes.some(n => n.name === data.node);
+        if (!hasNode) {
+          const buf = nodeBuffersRef.current[data.node] || { progress: [], llm: '' };
+          buf.progress.push(data.message);
+          nodeBuffersRef.current[data.node] = buf;
+          return s;
+        }
+        const updatedNodes = s.nodes.map(node => {
+          if (node.name !== data.node || node.status !== 'running') return node;
+          const msgs = [...(node.progressMessages || [])];
+          const last = msgs[msgs.length - 1];
+          if (last === data.message) return node; // 去重複
+          return { ...node, progressMessages: [...msgs, data.message] };
+        });
+        return { ...s, nodes: updatedNodes };
+      }),
+      onResultStreamChunk: (data) => setLiveStreamingState(s => {
+        const base = s || getInitialStreamingState();
+        let streamingDescription = base.streamingDescription || '';
+        let streamingCode = base.streamingCode || '';
+        let nodes = base.nodes || [];
+        if (data.code_preview) {
+          const hasCodegen = nodes.some(n => n.name === 'codegen');
+          if (!hasCodegen) {
+            const buf = nodeBuffersRef.current['codegen'] || { progress: [], llm: '' };
+            buf.codePreview = data.code_preview;
+            nodeBuffersRef.current['codegen'] = buf;
+          } else {
+            streamingCode = data.code_preview;
+            nodes = nodes.map(n => n.name === 'codegen' ? { ...n, metadata: { ...(n.metadata || {}), code_length: data.code_length || (data.code_preview?.length || 0) } as any } : n);
+          }
+        }
+        if (data.chunk) {
+          streamingDescription = streamingDescription + data.chunk;
+        }
+        return { ...base, streamingDescription, streamingCode, nodes };
+      }),
       onNodeStart: (data) => setLiveStreamingState(s => {
         const state = s || getInitialStreamingState();
         const newNode: NodeMetadata = { name: data.node, status: 'running', duration_ms: 0, started_at: data.started_at || new Date().toISOString(), metadata: {} as any, progressMessages: [] };
         const existingNodeIndex = state.nodes.findIndex(n => n.name === data.node);
-        const updatedNodes = existingNodeIndex !== -1 ? state.nodes.map((node, index) => index === existingNodeIndex ? newNode : node) : [...state.nodes, newNode];
+        let updatedNodes = existingNodeIndex !== -1 ? state.nodes.map((node, index) => index === existingNodeIndex ? newNode : node) : [...state.nodes, newNode];
+        const buf = nodeBuffersRef.current[data.node];
+        if (buf) {
+          updatedNodes = updatedNodes.map(n => n.name === data.node ? { ...n, progressMessages: buf.progress.length ? buf.progress : n.progressMessages } : n);
+          if (data.node === 'codegen') {
+            const codeAccum = (state.streamingCode || '') + (buf.llm || '') + (buf.codePreview || '');
+            nodeBuffersRef.current[data.node] = { progress: [], llm: '', codePreview: undefined };
+            return { ...state, currentNode: data.node, progress: progressMap[data.node] || state.progress, nodes: updatedNodes, streamingCode: codeAccum };
+          }
+          nodeBuffersRef.current[data.node] = { progress: [], llm: '', codePreview: undefined };
+        }
         return { ...state, currentNode: data.node, progress: progressMap[data.node] || state.progress, nodes: updatedNodes };
       }),
       onNodeComplete: (data) => setLiveStreamingState(s => {
         if (!s) return null;
-        let updatedNodes = s.nodes.map(node => node.name === data.node ? { ...node, status: data.status as 'success' | 'failed', duration_ms: data.duration_ms, completed_at: new Date().toISOString(), metadata: data.metadata || {} } : node);
+        const mappedStatus: 'success' | 'failed' = data.status === 'completed' ? 'success' : data.status === 'error' ? 'failed' : (data.status as 'success' | 'failed');
+        const meta = data.metadata || {};
+        let mappedMeta: any = meta;
+        if (data.node === 'intent') {
+          mappedMeta = { model: meta.model_used || meta.model, tokens: meta.tokens_used || meta.tokens };
+        } else if (data.node === 'codegen') {
+          mappedMeta = { model: meta.model_used || meta.model, tokens: meta.tokens_used || meta.tokens, code_length: meta.code_length };
+        } else if (data.node === 'execution') {
+          mappedMeta = { success: (meta.execution_success ?? meta.success) as boolean | undefined, output_files_count: meta.output_files_count, uploaded_files_count: meta.uploaded_files_count, error: meta.error };
+        } else if (data.node === 'review') {
+          mappedMeta = { model: meta.model_used || meta.model, tokens: meta.tokens_used || meta.tokens };
+        } else if (data.node === 'qa') {
+          mappedMeta = { model: meta.model_used || meta.model, tokens: meta.tokens_used || meta.tokens, test_cases_length: meta.test_cases_length, final_status: meta.final_status };
+        }
+        let updatedNodes = s.nodes.map(node => node.name === data.node ? { ...node, status: mappedStatus, duration_ms: data.duration_ms, completed_at: new Date().toISOString(), metadata: mappedMeta } : node);
         if (!updatedNodes.some(n => n.name === data.node)) {
-          updatedNodes.push({ name: data.node, status: data.status as 'success' | 'failed', duration_ms: data.duration_ms, started_at: new Date(Date.now() - (data.duration_ms || 0)).toISOString(), completed_at: new Date().toISOString(), metadata: data.metadata || {} });
+          updatedNodes.push({ name: data.node, status: mappedStatus, duration_ms: data.duration_ms, started_at: new Date(Date.now() - (data.duration_ms || 0)).toISOString(), completed_at: new Date().toISOString(), metadata: mappedMeta });
         }
         return { ...s, nodes: updatedNodes };
       }),
       onFinalResult: async (finalResult: FinalResultPayload) => {
+        const prevNodes = liveStateRef.current?.nodes || [];
+        const mappedFinalNodes = (finalResult.nodes || []).map((n: any) => ({
+          name: n.name,
+          status: (n.status === 'completed' ? 'success' : (n.status === 'error' ? 'failed' : n.status)) as 'success' | 'failed' | 'running',
+          duration_ms: Number(n.duration_ms || 0),
+          metadata: ({} as any),
+          progressMessages: Array.isArray(n.progress_messages) ? n.progress_messages : []
+        }));
+        const mergedNodes = mappedFinalNodes.map(n => {
+          const prev = prevNodes.find(p => p.name === n.name);
+          if (prev) {
+            return {
+              ...prev,
+              status: n.status,
+              duration_ms: n.duration_ms,
+              progressMessages: (prev.progressMessages && prev.progressMessages.length > 0) ? prev.progressMessages : n.progressMessages
+            };
+          }
+          return n;
+        });
+
+        setLiveStreamingState(s => ({ ...(s || getInitialStreamingState()), nodes: mergedNodes, currentNode: 'Completed', progress: 100 }));
+
         const currentStreamingMessageId = streamingMessageIdRef.current;
         if (!currentStreamingMessageId) return;
 
@@ -135,16 +267,17 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             description: finalResult.description || finalResult.execution?.stdout || "Workflow completed.",
             code: finalResult.code,
             statistics: statisticsData,
-            outputFiles: finalResult.output_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url })),
+            outputFiles: finalResult.output_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })),
+            inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })),
             toolsUsed: [],
-            executionTrace: finalResult.nodes,
+            executionTrace: mergedNodes,
           };
           const finalModelMessage: Message = { id: finalResult.message_id || currentStreamingMessageId, role: 'model', prompt: '', files: [], timestamp: new Date(), response: responsePayload };
           
           const updatedHistory = w.history.map(msg => {
             if (msg.id === currentStreamingMessageId) return finalModelMessage;
             const userMessageId = w.history[w.history.findIndex(m => m.id === currentStreamingMessageId) - 1]?.id;
-            if (msg.id === userMessageId) return { ...msg, inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url })) };
+            if (msg.id === userMessageId) return { ...msg, inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })) };
             return msg;
           });
           return { ...w, history: updatedHistory };
@@ -157,6 +290,7 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           setLiveStreamingState(null);
           setStreamingMessageId(null);
           streamingMessageIdRef.current = null;
+          nodeBuffersRef.current = {};
         }, 500);
       },
       onError: (errorMessage) => {

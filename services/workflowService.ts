@@ -1,7 +1,6 @@
 import type { Workflow, Message, AIResponsePayload, NodeMetadata, Statistics, StreamCallbacks } from '../types';
 import { fetchWithAuth } from './apiClient';
-
-const API_BASE_URL = 'https://1f78112e7eab.ngrok-free.app';
+import { API_BASE_URL } from '@/config';
 
 /**
  * Normalizes a date string from the API to a valid ISO 8601 format
@@ -31,6 +30,7 @@ export const runWorkflowStream = async (
   callbacks: StreamCallbacks,
   signal: AbortSignal
 ): Promise<void> => {
+  let __seq = 0;
   const formData = new FormData();
   formData.append('query', prompt);
   
@@ -46,6 +46,7 @@ export const runWorkflowStream = async (
     const response = await fetchWithAuth(`${API_BASE_URL}/api/generate/stream`, {
       method: 'POST',
       body: formData,
+      headers: { 'Accept': 'text/event-stream' },
       signal,
     });
 
@@ -65,70 +66,131 @@ export const runWorkflowStream = async (
 
     const processMessage = async (messageBlock: string) => {
         if (messageBlock.trim() === '') return;
-        
-        // Use regex to extract event and data, which is more robust
-        const eventMatch = messageBlock.match(/event: (.*)/);
-        // The 's' flag allows '.' to match newlines, in case the JSON data is multi-line.
-        const dataMatch = messageBlock.match(/data: (.*)/s); 
 
-        if (eventMatch && dataMatch) {
-            try {
-                const eventType = eventMatch[1].trim();
-                const dataString = dataMatch[1].trim();
-                const eventData = JSON.parse(dataString);
-                
-                // Route event to the correct callback
-                switch (eventType) {
+        const lines = messageBlock.split(/\r?\n/).filter(l => l.length > 0);
+        let eventType: string | undefined;
+        const dataLines: string[] = [];
+        for (const line of lines) {
+            if (line.startsWith('event:')) {
+                eventType = line.substring(6).trim();
+            } else if (line.startsWith('data:')) {
+                dataLines.push(line.substring(5).trimStart());
+            }
+        }
+
+        const rawData = dataLines.join('\n');
+        if (rawData.length === 0) return;
+        let eventData: any;
+        try {
+            eventData = JSON.parse(rawData);
+        } catch (e) {
+            console.error('Failed to parse SSE JSON payload:', rawData, e);
+            return;
+        }
+
+        const resolvedType = eventType || String(eventData.type || eventData.event || 'message');
+        const debug = Boolean((import.meta as any).env?.VITE_STREAM_DEBUG);
+        const normalizedData = { ...eventData, _seq: (++__seq), _ts: Date.now(), type: resolvedType };
+        if (debug) console.debug('[SSE]', resolvedType, normalizedData);
+        switch (resolvedType) {
                     case 'workflow_start':
                         callbacks.onWorkflowStart?.();
                         break;
                     case 'conversation_created':
-                        callbacks.onConversationCreated?.(eventData.conversation_id);
+                        callbacks.onConversationCreated?.(normalizedData.conversation_id);
                         break;
                     case 'files_uploaded':
-                        callbacks.onFilesUploaded?.(eventData.count);
+                        callbacks.onFilesUploaded?.(normalizedData.count);
                         break;
                     case 'llm_token':
-                        callbacks.onLlmToken?.(eventData);
+                        callbacks.onLlmToken?.(normalizedData);
                         break;
                     case 'node_progress':
-                        callbacks.onNodeProgress?.(eventData);
+                        callbacks.onNodeProgress?.(normalizedData);
                         break;
                     case 'result_stream_chunk':
-                        callbacks.onResultStreamChunk?.(eventData);
+                        callbacks.onResultStreamChunk?.(normalizedData);
+                        break;
+                    case 'execution_output':
+                        callbacks.onResultStreamChunk?.({
+                          node: normalizedData.node,
+                          chunk: normalizedData.output_preview ?? normalizedData.chunk ?? '',
+                          success: normalizedData.success
+                        });
+                        break;
+                    case 'code_generated':
+                        callbacks.onResultStreamChunk?.({
+                          node: normalizedData.node,
+                          code_preview: normalizedData.code_preview,
+                          code_length: normalizedData.code_length
+                        });
                         break;
                     case 'node_start':
-                        callbacks.onNodeStart?.(eventData);
+                        callbacks.onNodeStart?.(normalizedData);
                         break;
                     case 'node_complete':
-                        callbacks.onNodeComplete?.(eventData);
+                        callbacks.onNodeComplete?.(normalizedData);
                         break;
                     case 'final_result':
-                        await callbacks.onFinalResult?.(eventData);
+                        await callbacks.onFinalResult?.(normalizedData);
                         break;
                     case 'done':
-                        callbacks.onDone?.(eventData.status);
+                        callbacks.onDone?.(normalizedData.status);
                         break;
                     case 'node_error':
                     case 'workflow_error':
-                        callbacks.onError?.(eventData.error || `An error occurred during the '${eventType}' event.`);
+                        callbacks.onError?.(normalizedData.error || `An error occurred during the '${resolvedType}' event.`);
                         break;
                     case 'error':
-                        callbacks.onError?.(eventData.error || 'An unspecified error occurred on the stream.');
+                        callbacks.onError?.(normalizedData.error || 'An unspecified error occurred on the stream.');
+                        break;
+                    default:
+                        if (normalizedData) {
+                            if (normalizedData.node && normalizedData.status === 'started') {
+                                callbacks.onNodeStart?.(normalizedData);
+                                break;
+                            }
+                            if (normalizedData.node && (normalizedData.status === 'completed' || normalizedData.status === 'error' || normalizedData.status === 'success' || normalizedData.status === 'failed')) {
+                                callbacks.onNodeComplete?.(normalizedData);
+                                break;
+                            }
+                            if (typeof normalizedData.token === 'string') {
+                                callbacks.onLlmToken?.(normalizedData);
+                                break;
+                            }
+                            if (typeof normalizedData.chunk === 'string') {
+                                callbacks.onResultStreamChunk?.(normalizedData);
+                                break;
+                            }
+                            if (normalizedData.node && typeof normalizedData.message === 'string') {
+                                callbacks.onNodeProgress?.(normalizedData);
+                                break;
+                            }
+                            if (Array.isArray(normalizedData.nodes)) {
+                                await callbacks.onFinalResult?.(normalizedData);
+                                break;
+                            }
+                            if (normalizedData.status === 'success' || normalizedData.status === 'error') {
+                                callbacks.onDone?.(normalizedData.status);
+                                break;
+                            }
+                        }
                         break;
                 }
-            } catch (e) {
-                console.error("Failed to parse SSE data JSON:", dataMatch[1], e);
-            }
-        }
     };
     
     const processBuffer = async () => {
-        let boundaryIndex;
-        while ((boundaryIndex = buffer.indexOf('\n\n')) >= 0) {
+        let idxLF = buffer.indexOf('\n\n');
+        let idxCRLF = buffer.indexOf('\r\n\r\n');
+        while (idxLF >= 0 || idxCRLF >= 0) {
+            const useCRLF = idxCRLF >= 0 && (idxCRLF < idxLF || idxLF < 0);
+            const boundaryIndex = useCRLF ? idxCRLF : idxLF;
+            const sepLen = useCRLF ? 4 : 2;
             const messageBlock = buffer.substring(0, boundaryIndex);
-            buffer = buffer.substring(boundaryIndex + 2);
+            buffer = buffer.substring(boundaryIndex + sepLen);
             await processMessage(messageBlock);
+            idxLF = buffer.indexOf('\n\n');
+            idxCRLF = buffer.indexOf('\r\n\r\n');
         }
     };
 
@@ -224,7 +286,7 @@ export const getConversationDetails = async (conversationId: string): Promise<Me
             if (index + 1 < allMessages.length && allMessages[index + 1].role === 'assistant') {
                 const nextMsg = allMessages[index + 1];
                 if (nextMsg.metadata && nextMsg.metadata.input_files) {
-                     userMessage.inputFiles = nextMsg.metadata.input_files.map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url }));
+                     userMessage.inputFiles = nextMsg.metadata.input_files.map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path }));
                 }
             }
             return userMessage;
@@ -232,7 +294,7 @@ export const getConversationDetails = async (conversationId: string): Promise<Me
         } else if (msg.role === 'assistant') { 
             const metadata = msg.metadata || {};
 
-            const outputFiles = metadata?.output_files?.map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url })) || [];
+            const outputFiles = metadata?.output_files?.map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })) || [];
             
             let statistics: Statistics | string = "Statistics are not available for this step.";
             const statsFile = outputFiles.find((f: { name: string; }) => f.name === 'statistics.json');
@@ -259,6 +321,7 @@ export const getConversationDetails = async (conversationId: string): Promise<Me
               toolsUsed: [],
               statistics: statistics,
               outputFiles: outputFiles,
+              inputFiles: (metadata?.input_files || []).map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })),
               executionTrace: metadata?.nodes || [],
             };
 
@@ -275,7 +338,21 @@ export const getConversationDetails = async (conversationId: string): Promise<Me
     });
 
     const resolvedHistory = await Promise.all(historyPromises);
-    const history: Message[] = resolvedHistory.filter((item): item is Message => item !== null);
+  const history: Message[] = resolvedHistory.filter((item): item is Message => item !== null);
 
-    return history;
+  return history;
+};
+
+export const getConversationFiles = async (conversationId: string): Promise<{ input: { name: string; downloadUrl: string; filePath?: string }[]; output: { name: string; downloadUrl: string; filePath?: string }[] }> => {
+    const response = await fetchWithAuth(`${API_BASE_URL}/api/files?conversation_id=${encodeURIComponent(conversationId)}`, {
+        method: 'GET'
+    });
+    if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || 'Failed to fetch files list');
+    }
+    const data = await response.json();
+    const input = (data.files_by_type?.input || []).map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path }));
+    const output = (data.files_by_type?.output || []).map((f: any) => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path }));
+    return { input, output };
 };
