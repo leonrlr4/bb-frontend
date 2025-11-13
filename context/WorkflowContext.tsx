@@ -1,5 +1,5 @@
 import React, { createContext, useState, useEffect, useCallback, useContext, useMemo, useRef } from 'react';
-import { getWorkflowHistory, getConversationDetails, runWorkflowStream } from '../services/workflowService';
+import { getWorkflowHistory, getConversationDetails, runWorkflowStream, getConversationFiles } from '../services/workflowService';
 import { useAuth } from './AuthContext';
 import type { Workflow, Message, Template, AIResponsePayload, User, FinalResultPayload, NodeMetadata, StreamingState, Statistics, StreamCallbacks } from '../types';
 
@@ -267,8 +267,8 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             description: finalResult.description || finalResult.execution?.stdout || "Workflow completed.",
             code: finalResult.code,
             statistics: statisticsData,
-            outputFiles: finalResult.output_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })),
-            inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })),
+            outputFiles: finalResult.output_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url })),
+            inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url })),
             toolsUsed: [],
             executionTrace: mergedNodes,
           };
@@ -277,7 +277,7 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const updatedHistory = w.history.map(msg => {
             if (msg.id === currentStreamingMessageId) return finalModelMessage;
             const userMessageId = w.history[w.history.findIndex(m => m.id === currentStreamingMessageId) - 1]?.id;
-            if (msg.id === userMessageId) return { ...msg, inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url, filePath: f.file_path })) };
+            if (msg.id === userMessageId) return { ...msg, inputFiles: finalResult.input_files.map(f => ({ name: f.file_name, downloadUrl: f.download_url })) };
             return msg;
           });
           return { ...w, history: updatedHistory };
@@ -334,6 +334,11 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   const sendMessage = useCallback((prompt: string, rawFiles: File[]) => {
+    const trimmed = (prompt || '').trim();
+    if (trimmed.length === 0) {
+      setError('Please input something before sending.');
+      return;
+    }
     if (isStreaming) {
       abortControllerRef.current?.abort();
       return;
@@ -342,7 +347,7 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setIsStreaming(true);
     setError(null);
 
-    const userMessage: Message = { id: `msg-${Date.now()}`, role: 'user', prompt, files: rawFiles, timestamp: new Date() };
+    const userMessage: Message = { id: `msg-${Date.now()}`, role: 'user', prompt: trimmed, files: rawFiles, timestamp: new Date() };
     const placeholderModelMessage: Message = { id: `msg-${Date.now()}-ai`, role: 'model', prompt: '', files: [], timestamp: new Date() };
     
     setStreamingMessageId(placeholderModelMessage.id);
@@ -351,7 +356,7 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     setWorkflows(prev => {
       if (!activeWorkflowId) {
-        const newWorkflow: Workflow = { id: `wf-${Date.now()}`, title: prompt.substring(0, 40) + '...', createdAt: new Date(), history: [userMessage, placeholderModelMessage] };
+        const newWorkflow: Workflow = { id: `wf-${Date.now()}`, title: trimmed.substring(0, 40) + '...', createdAt: new Date(), history: [userMessage, placeholderModelMessage] };
         setActiveWorkflowId(newWorkflow.id);
         return [newWorkflow, ...prev];
       }
@@ -359,7 +364,7 @@ export const WorkflowProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
 
     abortControllerRef.current = new AbortController();
-    runWorkflowStream(prompt, rawFiles, activeWorkflowId, streamCallbacks, abortControllerRef.current.signal);
+    runWorkflowStream(trimmed, rawFiles, activeWorkflowId, streamCallbacks, abortControllerRef.current.signal);
 
   }, [isStreaming, activeWorkflowId, streamCallbacks]);
 

@@ -51,8 +51,27 @@ export const runWorkflowStream = async (
     });
 
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ detail: `HTTP error! status: ${response.status}` }));
-      const errorMessage = errorBody.detail || 'An unknown error occurred while calling the backend API.';
+      let errorMessage = `HTTP error! status: ${response.status}`;
+      try {
+        const rawText = await response.text();
+        if (rawText) {
+          try {
+            const errorJson = JSON.parse(rawText);
+            const d = (errorJson as any)?.detail;
+            if (Array.isArray(d)) {
+              errorMessage = d.map((e: any) => e?.msg || JSON.stringify(e)).join('; ');
+            } else if (typeof d === 'string') {
+              errorMessage = d;
+            } else if (d) {
+              errorMessage = JSON.stringify(d);
+            } else {
+              errorMessage = rawText;
+            }
+          } catch {
+            errorMessage = rawText;
+          }
+        }
+      } catch {}
       throw new Error(errorMessage);
     }
     
@@ -137,6 +156,9 @@ export const runWorkflowStream = async (
                     case 'done':
                         callbacks.onDone?.(normalizedData.status);
                         break;
+                    case 'client_disconnected':
+                        callbacks.onDone?.('aborted');
+                        break;
                     case 'node_error':
                     case 'workflow_error':
                         callbacks.onError?.(normalizedData.error || `An error occurred during the '${resolvedType}' event.`);
@@ -220,6 +242,7 @@ export const runWorkflowStream = async (
     console.error("Error calling backend stream API:", error);
     const errorMessage = error instanceof Error ? error.message : String(error);
     callbacks.onError?.(`Failed to connect to the streaming API. Error: ${errorMessage}`);
+    try { callbacks.onDone?.('error'); } catch {}
   }
 };
 
