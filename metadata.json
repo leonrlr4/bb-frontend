@@ -1,0 +1,5 @@
+{
+  "name": "Bio Build",
+  "description": "An advanced, biology-focused code generation platform powered by Gemini. Designed with a sleek, modern interface inspired by bioinformatics tools like Galaxy, it helps researchers and developers generate code for common biological tasks, from sequence alignment to phylogenetic analysis.",
+  "requestFramePermissions": []
+}
