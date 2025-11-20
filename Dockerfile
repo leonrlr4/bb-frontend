@@ -13,7 +13,7 @@ RUN npm ci --only=production=false
 COPY . .
 
 # Build arguments for environment variables
-ARG VITE_API_BASE_URL=https://api.bb-temp.click
+ARG VITE_API_BASE_URL=https://api.biobuild.click
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_ANON_KEY
 
