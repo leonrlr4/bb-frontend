@@ -247,7 +247,7 @@ export const runWorkflowStream = async (
 };
 
 export const getWorkflowHistory = async (): Promise<Workflow[]> => {
-    const response = await fetchWithAuth(`${API_BASE_URL}/api/conversations/`, {
+    const response = await fetchWithAuth(`${API_BASE_URL}/api/conversations`, {
         method: 'GET',
     });
 

@@ -39,8 +39,9 @@ export const fetchWithAuth = async (url: string, options: RequestInit = {}): Pro
             headers.set('Authorization', `Bearer ${token}`);
         }
         
-        // Let the browser set the Content-Type for FormData, as it includes the boundary.
-        if (!(options.body instanceof FormData)) {
+        const method = (options.method || 'GET').toString().toUpperCase();
+        const hasBody = options.body !== undefined && options.body !== null;
+        if (hasBody && !(options.body instanceof FormData)) {
             if (!headers.has('Content-Type')) {
                 headers.set('Content-Type', 'application/json');
             }
